@@ -1,5 +1,7 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.IO;
+using System.Text;
 using System.Windows.Forms;
 
 namespace Burnout3EI
@@ -114,7 +116,7 @@ namespace Burnout3EI
                 foreach (String file in openFileDialog1.FileNames)
                 {
                     var dump = openFileDialog1.FileName;
-                    
+
                     using (FileStream stream = File.Open(dump, FileMode.Open))
                     {
                         BinaryReader br = new BinaryReader(stream);
@@ -162,6 +164,14 @@ namespace Burnout3EI
                 //Avisa que terminou
                 MessageBox.Show("Texto Inserido", "AVISO");
             }
+        }
+
+        private void button3_Click(object sender, EventArgs e)
+        {
+            this.Hide(); //Esconde o formulário principal
+            Texture tx = new Texture(); //Define form2 como o formulário de visualização e extração gráfica do PS2
+            tx.FormClosed += (s, args) => this.Show(); //Fecha o programa se fechar o formulário
+            tx.Show(); //Mostra o formulário
         }
     }
 }
