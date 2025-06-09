@@ -28,6 +28,7 @@
         /// </summary>
         private void InitializeComponent()
         {
+            System.ComponentModel.ComponentResourceManager resources = new System.ComponentModel.ComponentResourceManager(typeof(Texture));
             this.label2 = new System.Windows.Forms.Label();
             this.label1 = new System.Windows.Forms.Label();
             this.buttonAbrirArquivos = new System.Windows.Forms.Button();
@@ -99,6 +100,7 @@
             this.pictureBoxDisplay.Anchor = ((System.Windows.Forms.AnchorStyles)((((System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Bottom) 
             | System.Windows.Forms.AnchorStyles.Left) 
             | System.Windows.Forms.AnchorStyles.Right)));
+            this.pictureBoxDisplay.BackColor = System.Drawing.Color.Transparent;
             this.pictureBoxDisplay.BorderStyle = System.Windows.Forms.BorderStyle.FixedSingle;
             this.pictureBoxDisplay.Location = new System.Drawing.Point(256, 25);
             this.pictureBoxDisplay.Name = "pictureBoxDisplay";
@@ -195,6 +197,8 @@
             // 
             this.AutoScaleDimensions = new System.Drawing.SizeF(6F, 13F);
             this.AutoScaleMode = System.Windows.Forms.AutoScaleMode.Font;
+            this.BackgroundImage = global::Burnout3EI.Properties.Resources.back;
+            this.BackgroundImageLayout = System.Windows.Forms.ImageLayout.Stretch;
             this.ClientSize = new System.Drawing.Size(860, 582);
             this.Controls.Add(this.zoomLevel);
             this.Controls.Add(this.btnZoomOut);
@@ -211,8 +215,9 @@
             this.Controls.Add(this.comboBoxImages);
             this.Controls.Add(this.comboBoxBinFiles);
             this.Controls.Add(this.pictureBoxDisplay);
+            this.Icon = ((System.Drawing.Icon)(resources.GetObject("$this.Icon")));
             this.Name = "Texture";
-            this.Text = "Visualizador de texturas 1.1";
+            this.Text = "Visualizador, Extrator e Importador de texturas";
             ((System.ComponentModel.ISupportInitialize)(this.pictureBoxDisplay)).EndInit();
             this.ResumeLayout(false);
             this.PerformLayout();

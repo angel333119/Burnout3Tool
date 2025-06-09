@@ -7,12 +7,14 @@ using System.IO;
 using System.Linq;
 using System.Text;
 using System.Windows.Forms;
+using DXTTools;
 
 namespace Burnout3EI
 {
     public partial class Texture : Form
     {
         private List<List<TxdTexture>> texturesPerFile = new List<List<TxdTexture>>();
+        private List<string> openFilePaths = new List<string>();
         private static readonly int[] _Interlace = { 0x00, 0x10, 0x02, 0x12, 0x11, 0x01, 0x13, 0x03 };
         private static readonly int[] _Matrix = { 0, 1, -1, 0 };
         private static readonly int[] _Tile = { 4, -4 };
@@ -32,11 +34,7 @@ namespace Burnout3EI
 
             ConfigurarMenuDeContexto();
             pictureBoxDisplay.ContextMenuStrip = menuDeContexto;
-
-            //pictureBoxDisplay.SizeMode = PictureBoxSizeMode.Zoom;
-            var quad = CriarFundoQuadriculado(pictureBoxDisplay.Width, pictureBoxDisplay.Height, 10);
-            pictureBoxDisplay.BackgroundImage = quad;
-            pictureBoxDisplay.BackgroundImageLayout = ImageLayout.Tile;
+            pictureBoxDisplay.BackColor = Color.Transparent;
 
             comboBoxBinFiles.SelectedIndexChanged += ComboBoxBinFiles_SelectedIndexChanged;
             comboBoxImages.SelectedIndexChanged += ComboBoxImages_SelectedIndexChanged;
@@ -67,16 +65,23 @@ namespace Burnout3EI
             comboBoxImages.Items.Clear();
             texturesPerFile.Clear();
             pictureBoxDisplay.Image = null;
+            openFilePaths.Clear();
+            pictureBoxDisplay.BackgroundImage = null;
 
             using (var ofd = new OpenFileDialog())
             {
                 ofd.Filter = "Burnout 3 TXD|*.TXD|Todos|*.*";
                 ofd.Multiselect = true;
                 if (ofd.ShowDialog() != DialogResult.OK) return;
+                
+                var quad = CriarFundoQuadriculado(pictureBoxDisplay.Width, pictureBoxDisplay.Height, 10);
+                pictureBoxDisplay.BackgroundImage = quad;
+                pictureBoxDisplay.BackgroundImageLayout = ImageLayout.Tile;
 
                 foreach (var path in ofd.FileNames)
                 {
                     comboBoxBinFiles.Items.Add(Path.GetFileName(path));
+                    openFilePaths.Add(path);
                     texturesPerFile.Add(CarregaTexturasDoArquivo(path));
                 }
 
@@ -122,19 +127,20 @@ namespace Burnout3EI
                         br.BaseStream.Seek(0x04, SeekOrigin.Current);
                         string nome = Encoding.Default.GetString(br.ReadBytes(8)).TrimEnd('\0');
 
-                        if (formato == 0xB) // Paletada
+                        if (formato == 0xB) // Paletada (Xbox)
                         {
-                            // 1. Lê os pixels indexados
+                            // 1. Lê os pixels indexados (swizzled)
                             br.BaseStream.Seek(offsets[i] + relImg, SeekOrigin.Begin);
-                            int rawSize = (bpp == 4) ? (w * h) / 2 : (w * h) * 2;
+                            // Para 4bpp, cada byte contém 2 pixels. Para 8bpp, cada byte é um pixel.
+                            int rawSize = (bpp == 4) ? (w * h) / 2 : (w * h);
                             byte[] rawPix = br.ReadBytes(rawSize);
 
-                            // 2. Desswizzle (reorganização dos índices)
-                            byte[] indices = (bpp == 4) ? UnswizzleNew4bpp(rawPix, w, h) : Unswizzle8bppXBOX(rawPix, w, h);
+                            // 2. Desswizzle (reorganização dos índices para a ordem linear)
+                            byte[] indices = (bpp == 4) ? Unswizzle4bppXBOX(rawPix, w, h) : Unswizzle8bppXBOX(rawPix, w, h);
 
-                            // 3. Leitura da estrutura de paleta (equivalente ao script Python)
+                            // 3. Leitura da estrutura de paleta
                             br.BaseStream.Seek(offsets[i] + 0x14, SeekOrigin.Begin);
-                            uint palPointerOffset = br.ReadUInt32(); // Offset relativo da entrada da paleta
+                            uint palPointerOffset = br.ReadUInt32();
                             long palStructAbs = offsets[i] + palPointerOffset;
 
                             br.BaseStream.Seek(palStructAbs, SeekOrigin.Begin);
@@ -143,7 +149,10 @@ namespace Burnout3EI
                             if (!(palHeader[0] == 0x01 && palHeader[1] == 0x00 && palHeader[2] == 0x03 &&
                                   (palHeader[3] == 0x00 || palHeader[3] == 0xC0)))
                             {
-                                throw new Exception($"Cabeçalho de paleta inválido no offset {palStructAbs:X}");
+                                // Se o cabeçalho não for o esperado, podemos pular esta textura para evitar erros.
+                                // O ideal seria logar um aviso.
+                                Console.WriteLine($"Cabeçalho de paleta inválido no offset {palStructAbs:X} para a textura {nome}. Pulando.");
+                                continue;
                             }
 
                             uint palDataRelOffset = br.ReadUInt32();
@@ -155,19 +164,26 @@ namespace Burnout3EI
                             byte[] palData = br.ReadBytes(colorCount * 4);
 
                             if (palData.Length < colorCount * 4)
-                                throw new Exception($"Paleta incompleta: esperava {colorCount * 4} bytes, leu {palData.Length}");
+                            {
+                                Console.WriteLine($"Paleta incompleta para a textura {nome}: esperava {colorCount * 4} bytes, leu {palData.Length}.");
+                                continue; // Pula texturas com dados de paleta corrompidos/incompletos
+                            }
 
-                            byte[] palette = SwapPalette(palData);
+                            // CORREÇÃO 2: Remover a chamada ao SwapPalette.
+                            // A função SwapPalette é para o formato do PS2, o Xbox não precisa disso.
+                            // byte[] palette = SwapPalette(palData); // <-- Linha REMOVIDA
+                            byte[] palette = palData; // <-- Usar os dados da paleta diretamente
+
                             Bitmap bmp = ApplyPaletteToBitmap(indices, palette, w, h, bpp);
 
                             lista.Add(new TxdTexture
                             {
-                                Name = $"{ids[i]} - {nome}",
+                                Name = $"{ids[i]} - {(bpp == 4 ? "4bpp" : "8bpp")} - {nome}",
                                 Width = w,
                                 Height = h,
-                                BitsPerPixel = 32,
+                                BitsPerPixel = 32, // O bitmap final é 32bpp
                                 DirectBitmap = bmp,
-                                Palettes = new List<byte[]> { palette },
+                                Palettes = new List<byte[]> { palette }, // Armazena a paleta caso precise dela depois
                                 TextureOffset = offsets[i] + relImg,
                                 PaletteOffset = palDataAbs
                             });
@@ -211,7 +227,8 @@ namespace Burnout3EI
                                 DirectBitmap = bmp,
                                 Palettes = new List<byte[]>(),
                                 TextureOffset = texOffset,
-                                PaletteOffset = 0
+                                PaletteOffset = 0,
+                                OriginalDxtFormat = dxtFmt
                             });
                         }
                         else if (formato == 0x3A) // RGBA
@@ -487,7 +504,52 @@ namespace Burnout3EI
             bmp.UnlockBits(data);
             return bmp;
         }
+        // Encontra o índice da cor na paleta que é mais parecida com o pixel alvo
+        private int FindClosestPaletteIndex(Color pixel, byte[] palette)
+        {
+            int closestIndex = 0;
+            int minDistance = int.MaxValue;
+            int colorCount = palette.Length / 4;
 
+            for (int i = 0; i < colorCount; i++)
+            {
+                int palR = palette[i * 4 + 0];
+                int palG = palette[i * 4 + 1];
+                int palB = palette[i * 4 + 2];
+                // O alfa da paleta do PS2 é de 7-bit, então normalizamos para 8-bit
+                int palA = Math.Min(palette[i * 4 + 3] * 2, 255);
+
+                // Calcula a "distância" entre as cores
+                int distance = (pixel.R - palR) * (pixel.R - palR) +
+                               (pixel.G - palG) * (pixel.G - palG) +
+                               (pixel.B - palB) * (pixel.B - palB) +
+                               (pixel.A - palA) * (pixel.A - palA);
+
+                if (distance < minDistance)
+                {
+                    minDistance = distance;
+                    closestIndex = i;
+                }
+
+                if (distance == 0) return i; // Encontrou a cor exata
+            }
+            return closestIndex;
+        }
+
+        // Converte um Bitmap inteiro para um array de índices de paleta (lineares)
+        private byte[] QuantizeImageToIndices(Bitmap image, byte[] palette)
+        {
+            byte[] indices = new byte[image.Width * image.Height];
+            for (int y = 0; y < image.Height; y++)
+            {
+                for (int x = 0; x < image.Width; x++)
+                {
+                    Color pixel = image.GetPixel(x, y);
+                    indices[y * image.Width + x] = (byte)FindClosestPaletteIndex(pixel, palette);
+                }
+            }
+            return indices;
+        }
         /// <summary>
         /// Desentrelaça rawPalAll (palCount paletas de paletteEntries entradas) em byte[palCount][]
         /// </summary>
@@ -595,7 +657,6 @@ namespace Burnout3EI
                 idxs = idxs.GetRange(0, n);
             return idxs;
         }
-
         public static byte[] SwapPalette(byte[] d)
         {
             if (d.Length != 1024) return d;
@@ -666,7 +727,6 @@ namespace Burnout3EI
             n = (n | (n << 1)) & 0x55555555;
             return n;
         }
-
         public static byte[] Unswizzle8bppPS2(byte[] buf, int w, int h)
         {
             var outb = new byte[w * h];
@@ -739,19 +799,77 @@ namespace Burnout3EI
 
             return linear;
         }
+        public static byte[] Swizzle8bppPS2(byte[] linear, int width, int height)
+        {
+            var swizzled = new byte[linear.Length];
+            for (int y = 0; y < height; y++)
+            {
+                for (int x = 0; x < width; x++)
+                {
+                    int block = (y & ~0x0F) * width + (x & ~0x0F) * 2;
+                    int swap = (((y + 2) >> 2) & 1) * 4;
+                    int posY = (((y & ~3) >> 1) + (y & 1)) & 7;
+                    int col = posY * width * 2 + ((x + swap) & 7) * 4;
+                    int bn = ((y >> 1) & 1) + ((x >> 2) & 2);
+
+                    int destIndex = block + col + bn;
+                    int sourceIndex = y * width + x;
+
+                    if (destIndex < swizzled.Length)
+                    {
+                        swizzled[destIndex] = linear[sourceIndex];
+                    }
+                }
+            }
+            return swizzled;
+        }
+        public static byte[] Swizzle4bppPS2(byte[] linearIndices, int width, int height)
+        {
+            // A lógica de swizzle para 4bpp no PS2 é complexa e pode variar.
+            // Esta implementação é uma aproximação baseada no formato de 8bpp.
+            // Primeiro, desempacotamos os índices para 1 byte por pixel para facilitar o swizzle.
+            byte[] unpacked = new byte[width * height];
+            for (int i = 0; i < linearIndices.Length; i++)
+            {
+                unpacked[i * 2] = (byte)(linearIndices[i] & 0x0F);
+                unpacked[i * 2 + 1] = (byte)(linearIndices[i] >> 4);
+            }
+
+            // Realiza o swizzle como se fosse 8bpp
+            byte[] swizzledUnpacked = Swizzle8bppPS2(unpacked, width, height);
+
+            // Reempacota os dados swizzled para 4bpp
+            byte[] repacked = new byte[width * height / 2];
+            for (int i = 0; i < repacked.Length; i++)
+            {
+                byte p1 = swizzledUnpacked[i * 2];
+                byte p2 = swizzledUnpacked[i * 2 + 1];
+                repacked[i] = (byte)(p1 | (p2 << 4));
+            }
+            return repacked;
+        }
         private void btnZoomIn_Click(object sender, EventArgs e)
         {
-
+            zoomSteps++;
+            AtualizarZoomFactor();
+            ApplyZoom();
         }
 
         private void btnZoomOut_Click(object sender, EventArgs e)
         {
-
+            // Não permite zoom menor que 50% para evitar imagens muito pequenas
+            if (zoomFactor > 0.5)
+            {
+                zoomSteps--;
+                AtualizarZoomFactor();
+                ApplyZoom();
+            }
         }
 
         private void AtualizarZoomFactor()
         {
-            zoomFactor = 1.0 + 0.5 * zoomSteps;
+            // Usando uma escala exponencial para um zoom mais suave
+            zoomFactor = Math.Pow(1.2, zoomSteps);
             zoomLevel.Text = $"Zoom {Math.Round(zoomFactor * 100)}%";
         }
 
@@ -761,15 +879,22 @@ namespace Burnout3EI
 
             int newW = (int)(originalImage.Width * zoomFactor);
             int newH = (int)(originalImage.Height * zoomFactor);
+
+            // Previne a criação de bitmaps com tamanho zero ou negativo
+            if (newW < 1 || newH < 1) return;
+
             var zoomed = new Bitmap(newW, newH);
             using (Graphics g = Graphics.FromImage(zoomed))
             {
-                g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                // Usar 'NearestNeighbor' preserva os pixels originais em grandes ampliações
+                g.InterpolationMode = InterpolationMode.NearestNeighbor;
+                g.PixelOffsetMode = PixelOffsetMode.HighQuality;
                 g.DrawImage(originalImage, 0, 0, newW, newH);
             }
 
             pictureBoxDisplay.Image = zoomed;
-            pictureBoxDisplay.SizeMode = (newW < pictureBoxDisplay.Width && newH < pictureBoxDisplay.Height)
+            // Centraliza a imagem se ela for menor que o PictureBox, senão, aplica zoom para caber
+            pictureBoxDisplay.SizeMode = (newW <= pictureBoxDisplay.Width && newH <= pictureBoxDisplay.Height)
                 ? PictureBoxSizeMode.CenterImage
                 : PictureBoxSizeMode.Zoom;
         }
@@ -828,12 +953,126 @@ namespace Burnout3EI
             salvarItem.Click += (s, e) => SalvarImagemComoPng();
 
             var importarItem = new ToolStripMenuItem("Importar PNG");
-            importarItem.Click += (s, e) => MessageBox.Show("Importação indisponível por enquanto!");
+            importarItem.Click += (s, e) => ImportarImagemPng();
 
             menuDeContexto.Items.Add(salvarItem);
             menuDeContexto.Items.Add(importarItem);
 
             pictureBoxDisplay.ContextMenuStrip = menuDeContexto;
+        }
+        private void ImportarImagemPng()
+        {
+            if (currentTexture == null)
+            {
+                MessageBox.Show("Nenhuma textura selecionada.", "Erro", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+
+            // Abre a janela para selecionar o arquivo PNG
+            using (var ofd = new OpenFileDialog())
+            {
+                ofd.Filter = "PNG Image|*.png";
+                ofd.Title = "Importar textura de um PNG";
+                if (ofd.ShowDialog() != DialogResult.OK) return;
+
+                // Carrega o PNG e verifica as dimensões
+                Bitmap newBitmap;
+                try { newBitmap = new Bitmap(ofd.FileName); }
+                catch (Exception ex)
+                {
+                    MessageBox.Show("Erro ao carregar o arquivo de imagem: " + ex.Message, "Erro", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    return;
+                }
+
+                if (newBitmap.Width != currentTexture.Width || newBitmap.Height != currentTexture.Height)
+                {
+                    MessageBox.Show($"A imagem selecionada ({newBitmap.Width}x{newBitmap.Height}) tem dimensões diferentes da original ({currentTexture.Width}x{currentTexture.Height}).\n\nPor favor, use uma imagem com as mesmas dimensões.", "Dimensões Incompatíveis", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    newBitmap.Dispose();
+                    return;
+                }
+
+                int selectedIndex = comboBoxBinFiles.SelectedIndex;
+                if (selectedIndex < 0) return;
+                string filePath = openFilePaths[selectedIndex];
+
+                try
+                {
+                    // ---- LÓGICA DE IMPORTAÇÃO ----
+                    if (currentTexture.OriginalDxtFormat != null) // É DXT (XBOX)
+                    {
+                        // Converte Bitmap para Color[]
+                        Color[] pixels = new Color[newBitmap.Width * newBitmap.Height];
+                        for (int y = 0; y < newBitmap.Height; y++)
+                            for (int x = 0; x < newBitmap.Width; x++)
+                                pixels[y * newBitmap.Width + x] = newBitmap.GetPixel(x, y);
+
+                        // Codifica para DXT
+                        DXTFormat dxtFormat = currentTexture.OriginalDxtFormat.Value;
+                        byte[] newDxtData = DXTEncoder.EncodeDXT(pixels, currentTexture.Width, currentTexture.Height, dxtFormat);
+
+                        // Escreve os dados DXT no arquivo
+                        using (var fs = new FileStream(filePath, FileMode.Open, FileAccess.Write))
+                        {
+                            fs.Seek(currentTexture.TextureOffset, SeekOrigin.Begin);
+                            fs.Write(newDxtData, 0, newDxtData.Length);
+                        }
+                    }
+                    else if (currentTexture.Palettes != null && currentTexture.Palettes.Count > 0) // É paletada (PS2)
+                    {
+                        // Pega a paleta atual que está sendo visualizada
+                        byte[] currentPalette = currentTexture.Palettes[currentPaletteIndex];
+
+                        // 1. "Quantiza" a imagem para obter os índices lineares
+                        byte[] linearIndices = QuantizeImageToIndices(newBitmap, currentPalette);
+
+                        // 2. Faz o "Swizzle" dos índices para o formato do PS2
+                        byte[] swizzledData;
+                        if (currentTexture.BitsPerPixel == 8)
+                        {
+                            swizzledData = Swizzle8bppPS2(linearIndices, currentTexture.Width, currentTexture.Height);
+                        }
+                        else // 4bpp
+                        {
+                            // Para 4bpp, precisamos empacotar 2 índices em cada byte antes do swizzle
+                            byte[] packedIndices = new byte[linearIndices.Length / 2];
+                            for (int i = 0; i < packedIndices.Length; i++)
+                            {
+                                byte p1 = linearIndices[i * 2 + 0];
+                                byte p2 = linearIndices[i * 2 + 1];
+                                packedIndices[i] = (byte)(p1 | (p2 << 4));
+                            }
+                            swizzledData = Swizzle4bppPS2(packedIndices, currentTexture.Width, currentTexture.Height);
+                        }
+
+                        // 3. Escreve os novos dados de pixel no arquivo (não mexemos na paleta)
+                        using (var fs = new FileStream(filePath, FileMode.Open, FileAccess.Write))
+                        {
+                            fs.Seek(currentTexture.TextureOffset, SeekOrigin.Begin);
+                            fs.Write(swizzledData, 0, swizzledData.Length);
+                        }
+                    }
+                    else
+                    {
+                        MessageBox.Show("Este formato de textura não suporta importação no momento.", "Aviso", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        return;
+                    }
+
+                    // ---- ATUALIZAÇÃO DA UI ----
+                    currentTexture.DirectBitmap = (Bitmap)newBitmap.Clone();
+                    originalImage = currentTexture.DirectBitmap;
+                    ApplyZoom();
+
+                    MessageBox.Show($"Textura '{currentTexture.Name}' importada e salva com sucesso!", "Sucesso", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show("Ocorreu um erro ao salvar os dados no arquivo: " + ex.Message, "Erro de Escrita", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+                finally
+                {
+                    newBitmap.Dispose();
+                }
+            }
         }
         private void SalvarImagemComoPng()
         {
@@ -876,158 +1115,6 @@ namespace Burnout3EI
         public Bitmap DirectBitmap { get; set; }
         public long TextureOffset { get; set; }
         public long PaletteOffset { get; set; }
-    }
-    public enum DXTFormat { DXT1, DXT3, DXT5 }
-
-    public static class DXTDecoder
-    {
-        public static Color[] DecodeDXT(byte[] dxtData, int width, int height, DXTFormat format)
-        {
-            int blockSize = (format == DXTFormat.DXT1) ? 8 : 16;
-            Color[] pixels = new Color[width * height];
-
-            using (var ms = new MemoryStream(dxtData))
-            using (var reader = new BinaryReader(ms))
-            {
-                for (int y = 0; y < height; y += 4)
-                {
-                    for (int x = 0; x < width; x += 4)
-                    {
-                        Color[] block = null;
-
-                        switch (format)
-                        {
-                            case DXTFormat.DXT1:
-                                block = DecodeDXT1Block(reader);
-                                break;
-                            case DXTFormat.DXT3:
-                                block = DecodeDXT3Block(reader);
-                                break;
-                            case DXTFormat.DXT5:
-                                block = DecodeDXT5Block(reader);
-                                break;
-                        }
-
-                        for (int by = 0; by < 4; by++)
-                        {
-                            for (int bx = 0; bx < 4; bx++)
-                            {
-                                int dstX = x + bx;
-                                int dstY = y + by;
-                                if (dstX < width && dstY < height)
-                                {
-                                    pixels[dstY * width + dstX] = block[by * 4 + bx];
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            return pixels;
-        }
-        private static Color[] DecodeDXT1Block(BinaryReader reader)
-        {
-            ushort color0 = reader.ReadUInt16();
-            ushort color1 = reader.ReadUInt16();
-            uint bits = reader.ReadUInt32();
-
-            Color[] colors = new Color[4];
-            colors[0] = RGB565ToColor(color0);
-            colors[1] = RGB565ToColor(color1);
-
-            if (color0 > color1)
-            {
-                colors[2] = Color.FromArgb(
-                    (2 * colors[0].R + colors[1].R) / 3,
-                    (2 * colors[0].G + colors[1].G) / 3,
-                    (2 * colors[0].B + colors[1].B) / 3);
-                colors[3] = Color.FromArgb(
-                    (colors[0].R + 2 * colors[1].R) / 3,
-                    (colors[0].G + 2 * colors[1].G) / 3,
-                    (colors[0].B + 2 * colors[1].B) / 3);
-            }
-            else
-            {
-                colors[2] = Color.FromArgb(
-                    (colors[0].R + colors[1].R) / 2,
-                    (colors[0].G + colors[1].G) / 2,
-                    (colors[0].B + colors[1].B) / 2);
-                colors[3] = Color.FromArgb(0, 0, 0, 0); // transparente
-            }
-
-            Color[] result = new Color[16];
-            for (int i = 0; i < 16; i++)
-            {
-                int code = (int)((bits >> (2 * i)) & 0x03);
-                result[i] = colors[code];
-            }
-
-            return result;
-        }
-
-        private static Color[] DecodeDXT3Block(BinaryReader reader)
-        {
-            ulong alphaBits = reader.ReadUInt64();
-            Color[] colorBlock = DecodeDXT1Block(reader);
-
-            Color[] result = new Color[16];
-            for (int i = 0; i < 16; i++)
-            {
-                byte alpha = (byte)(((alphaBits >> (i * 4)) & 0xF) * 17); // 4 bits -> 8 bits
-                Color c = colorBlock[i];
-                result[i] = Color.FromArgb(alpha, c.R, c.G, c.B);
-            }
-
-            return result;
-        }
-
-        private static Color[] DecodeDXT5Block(BinaryReader reader)
-        {
-            byte alpha0 = reader.ReadByte();
-            byte alpha1 = reader.ReadByte();
-            byte[] alphaIndices = reader.ReadBytes(6);
-            ulong alphaBits = 0;
-            for (int i = 0; i < 6; i++)
-                alphaBits |= ((ulong)alphaIndices[i]) << (8 * i);
-
-            Color[] colorBlock = DecodeDXT1Block(reader);
-
-            byte[] alphas = new byte[8];
-            alphas[0] = alpha0;
-            alphas[1] = alpha1;
-
-            if (alpha0 > alpha1)
-            {
-                for (int i = 2; i < 8; i++)
-                    alphas[i] = (byte)(((8 - i) * alpha0 + (i - 1) * alpha1) / 7);
-            }
-            else
-            {
-                for (int i = 2; i < 6; i++)
-                    alphas[i] = (byte)(((6 - i) * alpha0 + (i - 1) * alpha1) / 5);
-                alphas[6] = 0;
-                alphas[7] = 255;
-            }
-
-            Color[] result = new Color[16];
-            for (int i = 0; i < 16; i++)
-            {
-                int alphaCode = (int)((alphaBits >> (3 * i)) & 0x07);
-                byte alpha = alphas[alphaCode];
-                Color c = colorBlock[i];
-                result[i] = Color.FromArgb(alpha, c.R, c.G, c.B);
-            }
-
-            return result;
-        }
-
-        private static Color RGB565ToColor(ushort color)
-        {
-            int r = ((color >> 11) & 0x1F) << 3;
-            int g = ((color >> 5) & 0x3F) << 2;
-            int b = (color & 0x1F) << 3;
-            return Color.FromArgb(r, g, b);
-        }
-    }
+        public DXTFormat? OriginalDxtFormat { get; set; }
+    }    
 }
