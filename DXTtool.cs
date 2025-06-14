@@ -168,6 +168,7 @@ namespace DXTTools
 
     /// <summary>
     /// Classe estática para CODIFICAR texturas para os formatos DXT.
+    /// (VERSÃO CORRIGIDA E MELHORADA)
     /// </summary>
     public static class DXTEncoder
     {
@@ -196,7 +197,7 @@ namespace DXTTools
                             switch (format)
                             {
                                 case DXTFormat.DXT1:
-                                    EncodeDXT1Block(writer, block);
+                                    EncodeDXT1Block(writer, block, true);
                                     break;
                                 case DXTFormat.DXT3:
                                     EncodeDXT3Block(writer, block);
@@ -211,7 +212,7 @@ namespace DXTTools
                 return ms.ToArray();
             }
         }
-        
+
         private static ushort ColorToRGB565(Color color)
         {
             return (ushort)(((color.R >> 3) << 11) | ((color.G >> 2) << 5) | (color.B >> 3));
@@ -224,39 +225,46 @@ namespace DXTTools
 
             foreach (Color c in block)
             {
-                if (c.A < 128) continue;
+                if (c.R < min.R) min = Color.FromArgb(c.R, min.G, min.B);
+                if (c.G < min.G) min = Color.FromArgb(min.R, c.G, min.B);
+                if (c.B < min.B) min = Color.FromArgb(min.R, min.G, c.B);
 
-                if (c.R < min.R) min = Color.FromArgb(255, c.R, min.G, min.B);
-                if (c.G < min.G) min = Color.FromArgb(255, min.R, c.G, min.B);
-                if (c.B < min.B) min = Color.FromArgb(255, min.R, min.G, c.B);
-
-                if (c.R > max.R) max = Color.FromArgb(255, c.R, max.G, max.B);
-                if (c.G > max.G) max = Color.FromArgb(255, max.R, c.G, max.B);
-                if (c.B > max.B) max = Color.FromArgb(255, max.R, max.G, c.B);
+                if (c.R > max.R) max = Color.FromArgb(c.R, max.G, max.B);
+                if (c.G > max.G) max = Color.FromArgb(max.R, c.G, max.B);
+                if (c.B > max.B) max = Color.FromArgb(max.R, max.G, c.B);
             }
         }
-        
-        private static void EncodeDXT1Block(BinaryWriter writer, Color[] block)
-        {
-            GetMinMaxColors(block, out Color min, out Color max);
 
-            ushort c0_16 = ColorToRGB565(max);
-            ushort c1_16 = ColorToRGB565(min);
+        private static void EncodeDXT1Block(BinaryWriter writer, Color[] block, bool isDxt1)
+        {
+            GetMinMaxColors(block, out Color minColor, out Color maxColor);
+
+            ushort c0_16 = ColorToRGB565(maxColor);
+            ushort c1_16 = ColorToRGB565(minColor);
 
             if (c0_16 < c1_16)
             {
                 (c0_16, c1_16) = (c1_16, c0_16);
-                (min, max) = (max, min);
+                (minColor, maxColor) = (maxColor, minColor);
             }
-            
+
             writer.Write(c0_16);
             writer.Write(c1_16);
 
-            Color[] colors = new Color[4];
-            colors[0] = max;
-            colors[1] = min;
-            colors[2] = Color.FromArgb(255, (2 * max.R + min.R) / 3, (2 * max.G + min.G) / 3, (2 * max.B + min.B) / 3);
-            colors[3] = Color.FromArgb(255, (max.R + 2 * min.R) / 3, (max.G + 2 * min.G) / 3, (max.B + 2 * min.B) / 3);
+            Color[] palette = new Color[4];
+            palette[0] = maxColor;
+            palette[1] = minColor;
+
+            if (c0_16 > c1_16 || !isDxt1) // DXT3 e DXT5 sempre usam 4 cores
+            {
+                palette[2] = Color.FromArgb(255, (2 * palette[0].R + palette[1].R) / 3, (2 * palette[0].G + palette[1].G) / 3, (2 * palette[0].B + palette[1].B) / 3);
+                palette[3] = Color.FromArgb(255, (palette[0].R + 2 * palette[1].R) / 3, (palette[0].G + 2 * palette[1].G) / 3, (palette[0].B + 2 * palette[1].B) / 3);
+            }
+            else // DXT1 com canal alfa
+            {
+                palette[2] = Color.FromArgb(255, (palette[0].R + palette[1].R) / 2, (palette[0].G + palette[1].G) / 2, (palette[0].B + palette[1].B) / 2);
+                palette[3] = Color.FromArgb(0, 0, 0, 0); // Transparente
+            }
 
             uint bits = 0;
             for (int i = 0; i < 16; i++)
@@ -265,16 +273,17 @@ namespace DXTTools
                 int minDistance = int.MaxValue;
                 for (int j = 0; j < 4; j++)
                 {
-                    int dist = (block[i].R - colors[j].R) * (block[i].R - colors[j].R) +
-                               (block[i].G - colors[j].G) * (block[i].G - colors[j].G) +
-                               (block[i].B - colors[j].B) * (block[i].B - colors[j].B);
+                    int dist = (block[i].R - palette[j].R) * (block[i].R - palette[j].R) +
+                               (block[i].G - palette[j].G) * (block[i].G - palette[j].G) +
+                               (block[i].B - palette[j].B) * (block[i].B - palette[j].B);
+
                     if (dist < minDistance)
                     {
                         minDistance = dist;
                         bestIndex = j;
                     }
                 }
-                bits |= (uint)(bestIndex << (2 * i));
+                bits |= (uint)(bestIndex << (i * 2));
             }
             writer.Write(bits);
         }
@@ -288,23 +297,24 @@ namespace DXTTools
                 alphaBits |= (ulong)alpha << (i * 4);
             }
             writer.Write(alphaBits);
-            EncodeDXT1Block(writer, block);
+            EncodeDXT1Block(writer, block, false); // O `false` indica que não é DXT1 puro (não usa alfa)
         }
 
         private static void EncodeDXT5Block(BinaryWriter writer, Color[] block)
         {
-            byte alpha0 = 0, alpha1 = 255;
-            byte[] alphas = new byte[16];
-            for (int i = 0; i < 16; i++)
+            // 1. Encontrar min e max alfa no bloco
+            byte alpha0 = 0;   // max
+            byte alpha1 = 255; // min
+            foreach (var pixel in block)
             {
-                alphas[i] = block[i].A;
-                if (alphas[i] > alpha0) alpha0 = alphas[i];
-                if (alphas[i] < alpha1) alpha1 = alphas[i];
+                if (pixel.A > alpha0) alpha0 = pixel.A;
+                if (pixel.A < alpha1) alpha1 = pixel.A;
             }
-            
+
             writer.Write(alpha0);
             writer.Write(alpha1);
 
+            // 2. Gerar a paleta de 8 valores de alfa
             byte[] alphaPalette = new byte[8];
             alphaPalette[0] = alpha0;
             alphaPalette[1] = alpha1;
@@ -319,6 +329,7 @@ namespace DXTTools
                 alphaPalette[7] = 255;
             }
 
+            // 3. Encontrar o melhor índice para cada pixel e empacotar em 48 bits (6 bytes)
             ulong alphaBits = 0;
             for (int i = 0; i < 16; i++)
             {
@@ -326,7 +337,7 @@ namespace DXTTools
                 int minDistance = int.MaxValue;
                 for (int j = 0; j < 8; j++)
                 {
-                    int dist = Math.Abs(alphas[i] - alphaPalette[j]);
+                    int dist = Math.Abs(block[i].A - alphaPalette[j]);
                     if (dist < minDistance)
                     {
                         minDistance = dist;
@@ -336,8 +347,16 @@ namespace DXTTools
                 alphaBits |= (ulong)bestIndex << (i * 3);
             }
 
-            writer.Write(alphaBits);
-            EncodeDXT1Block(writer, block);
+            // 4. ESCREVER OS 6 BYTES CORRETAMENTE
+            writer.Write((byte)(alphaBits & 0xFF));
+            writer.Write((byte)((alphaBits >> 8) & 0xFF));
+            writer.Write((byte)((alphaBits >> 16) & 0xFF));
+            writer.Write((byte)((alphaBits >> 24) & 0xFF));
+            writer.Write((byte)((alphaBits >> 32) & 0xFF));
+            writer.Write((byte)((alphaBits >> 40) & 0xFF));
+
+            // 5. Codificar o bloco de cor
+            EncodeDXT1Block(writer, block, false);
         }
     }
 }
